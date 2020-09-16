@@ -1,0 +1,354 @@
+---
+title: "Mortality Time Series with the CenSoc-Numident Dataset"
+author: "Leslie Root (leslie.root@berkeley.edu)"
+date: "`r Sys.Date()`"
+output:
+  html_document:
+    df_print: paged
+vignette: |
+  %\VignetteIndexEntry{Vignette Title} %\VignetteEngine{knitr::rmarkdown} \usepackage[utf8]{inputenc}
+---
+
+**Summary**: This vignette gives an overview of the CenSoc-Numident dataset. In the examples that follow, we use the Numident data in an _unlinked_ format. Our goals for this vignette are:
+```
+1. To develop familiarity with the Numident death data, its possibilities and limitations;
+2. To construct and visualize a descriptive analysis of seasonal death patterns using this data; and
+3. To consider possible avenues for extending this analysis with a linked dataset.
+```
+Note: To get familiar with using linked data with the Numident dataset, consult [these vignettes](https://github.com/blahblah) (links to come) that use the CenSoc-Numident Demo dataset, a small dataset that is pre-linked to the 1940 Census. The smaller size of the file — approximately 1% of the records in the full CenSoc-Numident dataset — makes it easier to work with but precludes the high-resolution mortality research possible with the full CenSoc-Numident dataset. 
+
+The original R notebook (.Rmd file) for this vignette can be downloaded [here](https://github.com/lesliejroot/CenSoc). 
+
+Before getting started with the vignette, make sure to: 
+
+- [Download](https://censoc-download.demog.berkeley.edu/) the CenSoc Numident File (note: not the demo file! The file used here is currently called censoc_numident_v1.zip)
+- Install packages if necessary:  
+  -tidyverse  
+  -knitr  
+  -here  
+  -viridis  
+
+#Getting started
+Load packages and read in the data:
+```{r Library packages, warning=FALSE, message=FALSE}
+## Library Packages
+library(tidyverse)
+library(knitr)
+library(here)
+library(viridis)
+
+#edit this line to make sure it points to your downloaded dataset. I like to use the "here" package to make finding files easier, but if you prefer not to, you can remove it from this command. The file is large, so this might take a few seconds to run.
+options(readr.show_progress = FALSE)
+num <- read_csv(here("/censoc_numident_v1.csv"))
+
+## what are our variables?
+colnames(num)
+```
+
+We can see from the list of variable names that we have a pretty limited amount of information:  
+- person ID (used to link to the 1940 Census)  
+- birth and death dates (month and year)  
+- age at death  
+- sex  
+- a few measures of race and date information on when they were collected  
+- birthplace  
+- residence at time of death (as a ZIP code)  
+- state where the Social Security card was issued  
+- age at first Social Security application  
+- and a person-weight.  
+
+*Note that this is more information than the CenSoc-DMF data, which does not contain Social Security application covariates, and only includes men. (However, the DMF data has more years available.) For comparison of the various datasets currently available, be sure to visit [CenSoc](http://censoc.berkeley.edu). 
+
+Anything else we want to know about the people whose deaths are recorded in this dataset will have to come from linkage to the 1940 Census. For now, though, let's see what we can get out of the data we have here.
+
+```{r}
+table(num$death_age)
+```
+Interesting - our death ages start at 47 and go up to 121. Why is that? Let's look by year of death:
+
+```{r}
+table(num$death_age,num$dyear)
+```
+Aha! It's because our data runs from 1988 to 2005 - the years with the best Social Security death coverage. And we only observe people who were alive in 1940 - people who can potentially be linked to the 1940 Census.
+
+#Mortality time series by sex
+Let's construct a straightforward count of deaths by month/year, broken down by sex. First we need to adjust using the person weights provided. These weights were calculated based on [Human Mortality Database](http://mortality.org) data - for more details, see the [CenSoc Methods Protocol (pdf)](https://censoc.berkeley.edu/wp-content/uploads/2020/04/censoc_methods_protocol.pdf) - and it's important to use them, as some of them are quite large!
+
+*Note - I like to use the pipe operator [%>%] to make my code briefer and more organized - if you're not familiar with it, check out [this tutorial](https://www.datacamp.com/community/tutorials/pipe-r-tutorial) for more information.
+```{r}
+#a lot of people's weights are NA - they should be assigned a weight of 1
+num$weight <- ifelse(is.na(num$weight),1,num$weight)
+
+deaths <- num %>%
+  ##let's look at people 65 and older, because they are observed in every year of the data
+  filter(death_age >= 65) %>%
+  #"mutate" sex to something more intuitive
+  mutate(sex = ifelse(sex==1, "M", "F")) %>%
+  #to plot a timeseries, let's make the dates into an index. January 1988 becomes 1988.0, and each month adds 1/12 (~0.083) to that number.
+  #here we see that we can use "mutate" not only to change the coding of extant variables, but to create a new variable, "index":
+  mutate(index = (dyear + (dmonth/12-1/12))) %>%
+  #might as well keep year and month data, as well as index (it doesn't add any information, but later we'll use the dyear column again). group_by    helps us transform our dataframe from microdata into summary counts:
+  group_by(dyear,dmonth,index,sex) %>%
+  #final step - make a new variable that counts the number of deaths by the variables specified in the above step^
+  summarise(deaths=sum(weight))
+
+head(deaths)
+
+```
+Great, our dataframe has now been rearranged to give us monthly death counts by sex. Let's plot these deaths:
+
+```{r}
+deaths %>% 
+  ggplot(aes(index, deaths)) + 
+  geom_line() +
+  ylab("deaths")+
+  xlab("year")+
+  scale_x_continuous(breaks = seq(1988, 2006, 2),lim=c(1988,2006))+
+  facet_grid(rows=vars(sex))
+```
+
+These plots show that deaths oscillate throughout the year, and it looks like they do it in somewhat regular fashion. Let's investigate further.
+
+##Isolating seasonal variation
+
+We can divide the observed deaths each month by the expected deaths to get a standardized version of the seasonal variation - we will no longer see the rising time trend, only the fluctuations throughout each year. Monthly expected deaths, assuming flat mortality throughout the year, are defined as:
+
+$$ monthly\_expected\_deaths = \frac{yearly\_deaths}{days\_in\_year} * days\_in\_month$$
+
+The simplest way to do this would be to just divide the yearly deaths by 12, but since no month is technically 1/12 of the year, this more precise calculation is more accurate. As this code shows, it accounts for both variation in length of month and for 366-day leap years. You can never be too precise!
+
+I then calculated "standardized deaths" as a percentage deviation from the monthly expectation, but there are certainly other substantively identical ways one could construct this variable, if this construction doesn't seem intuitive to you:
+
+$$ standardized\_deaths = (100 * \frac{monthly\_observed\_deaths}{monthly\_expected\_deaths})-100 $$
+
+```{r}
+yrdeaths <- num %>%
+  filter(death_age >= 65) %>%
+  mutate(sex = ifelse(sex==1, "M", "F")) %>%
+  group_by(dyear,sex) %>% 
+  summarize(deaths=sum(weight)) %>%
+  mutate(avgdeaths1 = (deaths/365)*31) %>%
+  mutate(avgdeaths2 = (deaths/365)*30) %>%
+  mutate(avgdeaths3 = (deaths/365)*28) %>%
+  mutate(avgdeaths4 = (deaths/366)*31) %>%
+  mutate(avgdeaths5 = (deaths/366)*30) %>%
+  mutate(avgdeaths6 = (deaths/366)*29)
+  
+
+deaths <- merge(deaths,yrdeaths,by=c("dyear","sex"))
+
+deaths <- deaths %>%
+  select(-deaths.y) %>%
+  rename(deaths=deaths.x) %>%
+  mutate(stdeaths = ifelse(dmonth %in% c(1,3,5,7,8,10,12),100*deaths/avgdeaths1-100,NA)) %>%
+  mutate(stdeaths = ifelse(dmonth %in% c(4,6,9,11),100*deaths/avgdeaths2-100,stdeaths)) %>%
+  mutate(stdeaths = ifelse(dmonth == 2, 100*deaths/avgdeaths3-100,stdeaths)) %>%
+  mutate(stdeaths = ifelse(dmonth %in% c(1,3,5,7,8,10,12) & dyear %in% c(1988,1992,1996,2000,2004),100*deaths/avgdeaths4-100,stdeaths)) %>%
+  mutate(stdeaths = ifelse(dmonth %in% c(4,6,9,11) & dyear %in% c(1988,1992,1996,2000,2004),100*deaths/avgdeaths5-100,stdeaths)) %>%
+  mutate(stdeaths = ifelse(dmonth == 2 & dyear %in% c(1988,1992,1996,2000,2004),100*deaths/avgdeaths6-100,stdeaths))
+```
+
+Now to plot the standardized deaths:
+```{r}
+deaths %>% 
+  ggplot(aes(index, stdeaths)) + 
+  geom_line()+
+  ylab("standardized deaths (% deviation from yearly mean")+
+  xlab("year")+
+  facet_grid(rows=vars(sex))
+
+```
+
+Overlapping the two sexes makes it clearer that women experience slightly more seasonal variation than men:
+```{r}
+deaths %>% 
+  ggplot(aes(index, stdeaths,color=sex)) + 
+  geom_line()+
+  ylab("standardized deaths")+
+  xlab("year")
+```
+
+This is in line with previous research that finds that women have higher mortality rates for influenza, a significant driver of seasonal mortality variation.
+
+#Seasonal death heatmaps
+We can also plot the seasonal death patterns as a heatmap! First, death counts by month and year:
+```{r}
+deaths$dmonth_text <- as.factor(deaths$dmonth)
+
+levels(deaths$dmonth_text) <- c("Jan","Feb","Mar","Apr","May","Jun","Jul","Aug","Sep","Oct","Nov","Dec")
+
+ggplot(deaths, aes(dyear, dmonth_text, fill= deaths)) + 
+  geom_tile() +
+  scale_fill_viridis(option = "magma")+
+  ylab("month")+
+  xlab("year")+
+  facet_grid(rows=vars(sex))
+```
+
+This heatmap, like the line graph above, clearly shows how much more female deaths rose over this time period than male deaths. Now let's look at standardized deaths:
+```{r}
+ggplot(deaths, aes(dyear, dmonth_text, fill= stdeaths)) + 
+  geom_tile() +
+  scale_fill_viridis(option = "magma")+
+  ylab("month")+
+  xlab("year")+
+  scale_color_discrete(name="standardized deaths")+
+  labs(fill = "Standardized deaths")+
+  facet_grid(rows=vars(sex))
+```
+
+These heatmaps help us see clearly that June through September consistently have below-average deaths, while the month with the most excess death is generally between December and March, but seems to vary among those winter months a bit more randomly.
+
+#Describing variation by age at death
+In addition to comparing by sex, we can see, for example, whether women who die at younger-old ages (65-74), middle-old ages (75-84), or oldest-old ages (85+) experience the most seasonal variation in deaths. First we need to construct a factor variable for age with three levels, and then redo a good bit of the code above, to generate death counts by age group.
+
+```{r}
+deaths2 <- num %>%
+  filter(death_age >= 65) %>%
+  #convert age into a factor with three levels: young, mid, and old
+  mutate(age_index = ifelse(death_age<75,"young",NA))%>%
+  mutate(age_index = ifelse(death_age>=75,"mid",age_index))%>%
+  mutate(age_index = ifelse(death_age>=85,"old",age_index)) %>%
+  mutate(sex = ifelse(sex==1, "M", "F")) %>%
+  filter(sex == "F") %>%
+  mutate(index = (dyear + (dmonth/12-1/12))) %>%
+  group_by(dyear,dmonth,index,age_index) %>%
+  summarise(deaths=sum(weight))
+
+#put the factor's levels in the proper order
+deaths2$age_index <- factor(deaths2$age_index,levels=c("young","mid","old"))
+ 
+head(deaths2)
+
+```
+
+From a basic plot of the time trend in deaths by age group, we can already see that the oldest-old have the most growth in numbers of death, as well as the most seasonal variation.
+```{r}
+deaths2 %>% 
+  ggplot(aes(index, deaths)) + 
+  geom_line() +
+  ylab("deaths")+
+  xlab("year")+
+  scale_x_continuous(breaks = seq(1988, 2006, 2),lim=c(1988,2006))+
+  facet_grid(rows=vars(age_index))
+```
+
+Constructing standardized deaths again:
+```{r}
+yrdeaths2 <- num %>%
+  filter(death_age >= 65) %>%
+  mutate(age_index = ifelse(death_age<75,"young",NA))%>%
+  mutate(age_index = ifelse(death_age>=75,"mid",age_index))%>%
+  mutate(age_index = ifelse(death_age>=85,"old",age_index)) %>%
+  mutate(sex = ifelse(sex==1, "M", "F")) %>%
+  filter(sex == "F") %>%
+  group_by(dyear,age_index) %>% 
+  summarize(deaths=sum(weight)) %>%
+  mutate(avgdeaths1 = (deaths/365)*31) %>%
+  mutate(avgdeaths2 = (deaths/365)*30) %>%
+  mutate(avgdeaths3 = (deaths/365)*28) %>%
+  mutate(avgdeaths4 = (deaths/366)*31) %>%
+  mutate(avgdeaths5 = (deaths/366)*30) %>%
+  mutate(avgdeaths6 = (deaths/366)*29)
+
+deaths2 <- merge(deaths2,yrdeaths2,by=c("dyear","age_index"))
+
+deaths2 <- deaths2 %>%
+  select(-deaths.y) %>%
+  rename(deaths=deaths.x) %>%
+  mutate(stdeaths = ifelse(dmonth %in% c(1,3,5,7,8,10,12),100*deaths/avgdeaths1-100,NA)) %>%
+  mutate(stdeaths = ifelse(dmonth %in% c(4,6,9,11),100*deaths/avgdeaths2-100,stdeaths)) %>%
+  mutate(stdeaths = ifelse(dmonth == 2, 100*deaths/avgdeaths3-100,stdeaths)) %>%
+  mutate(stdeaths = ifelse(dmonth %in% c(1,3,5,7,8,10,12) & dyear %in% c(1988,1992,1996,2000,2004),100*deaths/avgdeaths4-100,stdeaths)) %>%
+  mutate(stdeaths = ifelse(dmonth %in% c(4,6,9,11) & dyear %in% c(1988,1992,1996,2000,2004),100*deaths/avgdeaths5-100,stdeaths)) %>%
+  mutate(stdeaths = ifelse(dmonth == 2 & dyear %in% c(1988,1992,1996,2000,2004),100*deaths/avgdeaths6-100,stdeaths))
+```
+
+Isolating and graphing the seasonal mortality variation, we can confirm that the youngest-old experience the least seasonal variation, and the oldest-old the most. We might hypothesize that this is attributable to differentials in influenza mortality by age.
+```{r}
+deaths2 %>% 
+  ggplot(aes(index, stdeaths)) + 
+  geom_line()+
+  ylab("standardized deaths")+
+  xlab("year")+
+  facet_grid(rows=vars(age_index))
+```
+
+#Seasonal death heatmaps by age group
+
+Repeating our heatmaps, we can see that our monthly count of deaths is perhaps not best visualized this way, since the counts are so different for the different age groups.
+```{r}
+deaths2$dmonth_text <- as.factor(deaths2$dmonth)
+
+levels(deaths2$dmonth_text) <- c("Jan","Feb","Mar","Apr","May","Jun","Jul","Aug","Sep","Oct","Nov","Dec")
+
+ggplot(deaths2, aes(dyear, dmonth_text, fill= deaths)) + 
+  geom_tile() +
+  scale_fill_viridis(option = "magma")+
+  ylab("month")+
+  xlab("year")+
+  facet_grid(rows=vars(age_index))
+```
+
+The heatmap of standardized deaths is a bit more useful - the gradient in extent of color variation between the three graphs is very clear.
+```{r}
+ggplot(deaths2, aes(dyear, dmonth_text, fill= stdeaths)) + 
+  geom_tile() +
+  scale_fill_viridis(option = "magma")+
+  ylab("month")+
+  xlab("year")+
+  scale_color_discrete(name="standardized deaths")+
+  labs(fill = "Standardized deaths")+
+  facet_grid(rows=vars(age_index))
+```
+
+#Conclusion
+
+There are other descriptives we could also construct in this vein: for example, we could look at seasonal variation by residence at death, or by race (although this requires careful consideration, given that some respondents may have more than one race recorded - for further guidance on using race in this dataset, check out [these vignettes](http://links_to_come)).
+
+However, this exercise on its own probably does not add much to our knowledge of seasonal mortality trends, which are heavily driven by influenza and pneumonia mortality and are thus pretty well-studied using datasets that include cause-of-death data. The potential added value from this data is in the many individual-level covariates available to us in the 1940 census. A future vignette will explore how to extend this analysis beyond the descriptive, by linking the full Numident data to the 1940 census.
+
+#Epilogue
+
+Although this vignette focused on seasonal variation, we can also use the yearly deaths data we generated to isolate the time trend, without the seasonal variation:
+```{r}
+yrdeaths %>% 
+  ggplot(aes(dyear, deaths)) + 
+  geom_line()+
+  ylab("deaths")+
+  xlab("year")+
+  facet_grid(rows=vars(sex))
+```
+
+Wow! Looks like female deaths rose a lot more than male deaths during this period. Remember that these are raw counts, not rates, so changes in the population size and structure will have a large effect. To be on the safe side, let's compare this data to HMD data.
+
+Data can be downloaded by creating a free account at [the HMD](https://www.mortality.org).
+
+```{r}
+hmd <- read.table(here("/Deaths_1x1.txt"),header=T,skip=2) %>%
+  filter(Year %in% c(1988:2005)) %>%
+  mutate(Age =ifelse(Age=="110+",110,Age)) %>%
+  mutate(Age = as.numeric(as.character(Age))) %>%
+  rename(dyear=Year) %>%
+  filter(Age >= 65) %>%
+  gather(sex,deaths,c("Female","Male","Total")) %>%
+  filter(sex %in% c("Female","Male")) %>%
+  mutate(sex = ifelse(sex=="Female","F","M")) %>%
+  group_by(dyear,sex) %>%
+  summarize(deaths=sum(deaths))
+
+yrdeaths <- merge(yrdeaths,hmd,by=c("dyear","sex")) %>%
+  rename(numdeaths=deaths.x) %>%
+  rename(hmddeaths=deaths.y) %>%
+  gather(Variable,Value,c("numdeaths","hmddeaths"))
+
+
+yrdeaths %>% 
+  ggplot(aes(dyear, Value,color=Variable)) + 
+  geom_line()+
+  ylab("deaths")+
+  xlab("year")+
+  facet_grid(rows=vars(sex))
+```
+
+It looks like the Numident data varies quite a bit from the HMD data in the first few years, especially for women, but overall, the trend looks similar, and our observation that female deaths rose a lot more than did male deaths is borne out by this check.
